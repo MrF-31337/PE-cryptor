@@ -28,8 +28,8 @@ public:
 	};
 
 	PE(const string &fname);
-	void add_section(const Section &section);
-	void resize_section(Section & section, uint new_size);
+	void add_section(shared_ptr<Section> &section);
+	void resize_section(shared_ptr<Section> &section, uint new_size);
 	void save(const string &fname);
 	void shift_sections_if_necesseary(uint index, uint new_offset);
 
@@ -38,7 +38,7 @@ public:
 	IMAGE_FILE_HEADER *file_header;
 	IMAGE_OPTIONAL_HEADER *optional_header;
 	IMAGE_DATA_DIRECTORY *data_directory;
-	vector<Section> sections;
+	vector<shared_ptr<Section>> sections;
 
 	static uint align(uint n, uint alignment);
 private:

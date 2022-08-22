@@ -17,6 +17,14 @@ public:
 	{
 		memset(&new_section_header, 0, sizeof(IMAGE_SECTION_HEADER));
 		has_reloc = (bool)pe.data_directory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
+		if (has_reloc)
+		{
+			reloc_section = *find_if(pe.sections.begin(), pe.sections.end(), 
+				[this] (shared_ptr<PE::Section> &section) {
+					return section->header->VirtualAddress == pe.data_directory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
+				}
+			);
+		}
 	}
 
 	void encrypt(const string& output_fname)
@@ -24,8 +32,8 @@ public:
 		calculate_virtual_address();
 		vector<uint> offsets = generate_shellcode();
 		init_new_section();
-		PE::Section new_section(&new_section_header, shellcode);
-		new_section.contains_in_data_directory = true;
+		shared_ptr new_section = make_shared<PE::Section>(&new_section_header, shellcode);
+		new_section->contains_in_data_directory = true;
 		pe.add_section(new_section);
 		edit_reloc_table(offsets);
 
@@ -58,10 +66,10 @@ public:
 		uint offset = sizeof(shellcode_start)-1;
 		for (auto& section : pe.sections)
 		{
-			if (section.contains_in_data_directory)
+			if (section->contains_in_data_directory)
 				continue;
-			write_push(shellcode, section.header->SizeOfRawData, offset);
-			write_push(shellcode, pe.optional_header->ImageBase + section.header->VirtualAddress, offset + 5);
+			write_push(shellcode, section->header->SizeOfRawData, offset);
+			write_push(shellcode, pe.optional_header->ImageBase + section->header->VirtualAddress, offset + 5);
 			offsets.push_back(offset + 6);
 			offset += 10;
 		}
@@ -85,23 +93,15 @@ public:
 		uint factical_reloc_size = PE::align(sizeof(IMAGE_BASE_RELOCATION) + offsets.size() * 2, 4);
 		uint reloc_section_size = PE::align(factical_reloc_size, pe.optional_header->FileAlignment);
 
-		PE::Section reloc_section = *find_if(pe.sections.begin(), pe.sections.end(), [this](PE::Section &section) {
-			return section.header->VirtualAddress == pe.data_directory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
-		});
-
 		pe.resize_section(reloc_section, reloc_section_size);
 
-		reloc_section = *find_if(pe.sections.begin(), pe.sections.end(), [this](PE::Section& section) {
-			return section.header->VirtualAddress == pe.data_directory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
-		}); // Гавнокод
-
 		pe.data_directory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = factical_reloc_size;
-		memset(reloc_section.data, 0, reloc_section_size);
+		memset(reloc_section->data, 0, reloc_section_size);
 
-		IMAGE_BASE_RELOCATION* reloc_entry = (IMAGE_BASE_RELOCATION*)reloc_section.data;
+		IMAGE_BASE_RELOCATION* reloc_entry = (IMAGE_BASE_RELOCATION*)reloc_section->data;
 		reloc_entry->SizeOfBlock = factical_reloc_size;
 		reloc_entry->VirtualAddress = new_section_header.VirtualAddress;
-		WORD* blocks = at_offset(reloc_section.data, sizeof(IMAGE_BASE_RELOCATION), WORD);
+		WORD* blocks = at_offset(reloc_section->data, sizeof(IMAGE_BASE_RELOCATION), WORD);
 		for (uint i = 0; i < offsets.size(); i++)
 			blocks[i] = (IMAGE_REL_BASED_HIGHLOW << 12) | (offsets[i] & 0xfff);
 	}
@@ -117,10 +117,7 @@ public:
 		{
 			if (offset >= reloc_size)
 				break;
-			PE::Section reloc_section = *find_if(pe.sections.begin(), pe.sections.end(), [this](PE::Section& section) {
-				return section.header->VirtualAddress == pe.data_directory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
-			});
-			IMAGE_BASE_RELOCATION* relocation = at_offset(reloc_section.data, offset, IMAGE_BASE_RELOCATION);
+			IMAGE_BASE_RELOCATION* relocation = at_offset(reloc_section->data, offset, IMAGE_BASE_RELOCATION);
 			WORD* reloc_offsets = at_offset(relocation, sizeof(IMAGE_BASE_RELOCATION), WORD);
 			uint offsets_count = (relocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
 			for (uint i = 0; i < offsets_count; i++)
@@ -140,20 +137,21 @@ public:
 	{
 		for (auto section : pe.sections)
 		{
-			if (section.contains_in_data_directory || section.header->VirtualAddress == new_section_header.VirtualAddress)
+			if (section->contains_in_data_directory || section->header->VirtualAddress == new_section_header.VirtualAddress)
 				break;
-			char* data = section.data;
-			uint size = section.header->SizeOfRawData;
+			char* data = section->data;
+			uint size = section->header->SizeOfRawData;
 			for (uint i = 0; i < size; i++)
 				data[i] ^= 0xff;
-			section.header->Characteristics |= IMAGE_SCN_MEM_WRITE;
+			section->header->Characteristics |= IMAGE_SCN_MEM_WRITE;
 		}
 	}
 
 	void init_new_section() 
 	{
-		PE::Section& last_section = pe.sections[pe.sections.size() - 1];
-		uint pointer_to_raw_data = last_section.header->PointerToRawData + last_section.header->SizeOfRawData;
+		shared_ptr last_section = pe.sections[pe.sections.size() - 1];
+		
+		uint pointer_to_raw_data = last_section->header->PointerToRawData + last_section->header->SizeOfRawData;
 		
 		new_section_header.PointerToRawData = PE::align(pointer_to_raw_data, pe.optional_header->FileAlignment);
 
@@ -164,12 +162,14 @@ public:
 	}
 
 	void calculate_virtual_address() {
-		vector<PE::Section*> sections_sorted_by_addr;
+		vector<shared_ptr<PE::Section>> sections_sorted_by_addr;
 		for (auto section : pe.sections)
-			sections_sorted_by_addr.push_back(&section);
-		sort(sections_sorted_by_addr.begin(), sections_sorted_by_addr.end(), [](PE::Section* s1, PE::Section* s2) {
-			return s1->header->VirtualAddress < s2->header->VirtualAddress;
-			});
+			sections_sorted_by_addr.push_back(section);
+		sort(sections_sorted_by_addr.begin(), sections_sorted_by_addr.end(), 
+			[] (shared_ptr<PE::Section> &s1, shared_ptr<PE::Section> &s2) {
+				return s1->header->VirtualAddress < s2->header->VirtualAddress;
+			}
+		);
 		PE::Section& last_section1 = *sections_sorted_by_addr[sections_sorted_by_addr.size() - 1];
 		uint virtual_address = last_section1.header->VirtualAddress + last_section1.header->Misc.VirtualSize;
 		new_section_header.VirtualAddress = PE::align(virtual_address, pe.optional_header->SectionAlignment);
@@ -184,6 +184,7 @@ public:
 private:
 	PE pe;
 	IMAGE_SECTION_HEADER new_section_header;
+	shared_ptr<PE::Section> reloc_section;
 	uint shellcode_section_size = 0;
 	char* shellcode;
 	bool has_reloc = true;
@@ -193,7 +194,7 @@ private:
 int main(int argc, char** argv)
 {
 	CLI::App app{ "Simple PE cryptor" };
-	std::string input = "", output;
+	std::string input , output;
 	app.add_option("-f,--file", input, "Input file")->required(true);
 	app.add_option("-o,--output", output, "Output file")->required(true);
 
